@@ -1,0 +1,53 @@
+[package]
+name = "comar-mcp"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.88"
+description = "MCP server for the Code of Maryland Regulations (COMAR), authenticated with TUF/TAF"
+license = "MIT OR Apache-2.0"
+
+[dependencies]
+anyhow = "1"
+arc-swap = "1"
+async-trait = "0.1"
+bytes = "1"
+clap = { version = "4", features = ["derive", "env"] }
+futures = "0.3"
+gix = { version = "0.90", default-features = false, features = [
+    "blocking-network-client",
+    "blocking-http-transport-reqwest-rust-tls",
+    "max-performance",
+    "sha1",
+] }
+jiff = "0.2"
+percent-encoding = "2"
+rmcp = { version = "3.9", features = [
+    "server",
+    "macros",
+    "schemars",
+    "transport-io",
+    "transport-streamable-http-server",
+] }
+roxmltree = "0.21"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "signal", "sync", "time"] }
+tokio-util = "0.7"
+tough = "0.24"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+url = "2"
+axum = "0.8"
+
+# Upstream tough can't read TAF metadata yet: it only verifies RSA-PSS (TAF signs
+# with RSASSA-PKCS1-v1_5) and it rejects key IDs computed over a trimmed PEM. The
+# vendored copy is tough 0.24.0 plus patches/tough-taf-compat.patch until those
+# changes land upstream.
+[patch.crates-io]
+tough = { path = "vendor/tough" }
+
+[profile.release]
+lto = "thin"
+
+[dev-dependencies]
+hex = "0.4"

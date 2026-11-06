@@ -1,0 +1,116 @@
+--- a/tough/src/schema/de.rs
++++ b/tough/src/schema/de.rs
+@@ -22,14 +22,20 @@
+         key: Key,
+         map: &mut HashMap<Decoded<Hex>, Key>,
+     ) -> Result<(), error::Error> {
+-        let calculated = key.key_id()?;
++        let accepted = key.accepted_key_ids()?;
+         let keyid_hex = hex::encode(&keyid);
+         ensure!(
+-            keyid == calculated,
++            accepted.contains(&keyid),
+             error::InvalidKeyIdSnafu {
+                 keyid: &keyid_hex,
+-                calculated: hex::encode(&calculated),
++                calculated: hex::encode(&accepted[0]),
+             }
++        );
++        // Since more than one ID can name a key, make sure no key is listed twice under
++        // different IDs, which would let one key count twice towards a signature threshold.
++        ensure!(
++            !map.values().any(|k| k.same_public_key(&key)),
++            error::DuplicateKeyIdSnafu { keyid: keyid_hex }
+         );
+         ensure!(
+             map.insert(keyid, key).is_none(),
+--- a/tough/src/schema/decoded.rs
++++ b/tough/src/schema/decoded.rs
+@@ -32,6 +32,17 @@
+     pub fn into_vec(self) -> Vec<u8> {
+         self.bytes
+     }
++
++    /// A copy whose original string has surrounding whitespace removed, or `None` if there was
++    /// none. The decoded bytes are unchanged.
++    pub(crate) fn trimmed(&self) -> Option<Self> {
++        let trimmed = self.original.trim();
++        (trimmed.len() != self.original.len()).then(|| Self {
++            bytes: self.bytes.clone(),
++            original: trimmed.to_owned(),
++            spooky: PhantomData,
++        })
++    }
+ }
+ 
+ impl<T: Encode> From<Vec<u8>> for Decoded<T> {
+--- a/tough/src/schema/key.rs
++++ b/tough/src/schema/key.rs
+@@ -86,6 +86,10 @@
+ pub enum RsaScheme {
+     /// `rsassa-pss-sha256`: RSA Probabilistic signature scheme with appendix.
+     RsassaPssSha256,
++    /// `rsa-pkcs1v15-sha256`: RSASSA-PKCS1-v1_5 with SHA-256, as produced by
++    /// securesystemslib (and therefore python-tuf and TAF).
++    #[serde(rename = "rsa-pkcs1v15-sha256")]
++    RsaPkcs1v15Sha256,
+ }
+ 
+ /// Represents a deserialized (decoded) RSA public key.
+@@ -150,6 +154,41 @@
+         Ok(digest(&SHA256, &buf).as_ref().to_vec().into())
+     }
+ 
++    /// The key IDs accepted for this key in metadata: the one from [`Key::key_id`] and, for a
++    /// PEM key stored with surrounding whitespace, the ID of the same key with the PEM trimmed.
++    /// securesystemslib (used by python-tuf and TAF) computes key IDs over the stripped PEM but
++    /// can serialize the PEM with a trailing newline.
++    pub(super) fn accepted_key_ids(&self) -> Result<Vec<Decoded<Hex>>> {
++        let mut ids = vec![self.key_id()?];
++        let mut trimmed = self.clone();
++        let changed = match &mut trimmed {
++            Key::Rsa { keyval, .. } => keyval.public.trimmed().map(|t| keyval.public = t),
++            Key::Ecdsa { keyval, .. } | Key::EcdsaOld { keyval, .. } => {
++                keyval.public.trimmed().map(|t| keyval.public = t)
++            }
++            Key::Ed25519 { .. } => None,
++        };
++        if changed.is_some() {
++            ids.push(trimmed.key_id()?);
++        }
++        Ok(ids)
++    }
++
++    /// Whether two keys have the same type, scheme and public key material.
++    pub(super) fn same_public_key(&self, other: &Key) -> bool {
++        match (self, other) {
++            (Key::Rsa { keyval: a, scheme: s, .. }, Key::Rsa { keyval: b, scheme: t, .. }) => {
++                s == t && a.public == b.public
++            }
++            (Key::Ed25519 { keyval: a, .. }, Key::Ed25519 { keyval: b, .. }) => a.public == b.public,
++            (
++                Key::Ecdsa { keyval: a, .. } | Key::EcdsaOld { keyval: a, .. },
++                Key::Ecdsa { keyval: b, .. } | Key::EcdsaOld { keyval: b, .. },
++            ) => a.public == b.public,
++            _ => false,
++        }
++    }
++
+     /// Verify a signature of an object made with this key.
+     pub(super) fn verify(&self, msg: &[u8], signature: &[u8]) -> bool {
+         let (alg, public_key): (&dyn VerificationAlgorithm, untrusted::Input<'_>) = match self {
+@@ -180,6 +219,14 @@
+                 ..
+             } => (
+                 &aws_lc_rs::signature::RSA_PSS_2048_8192_SHA256,
++                untrusted::Input::from(&keyval.public),
++            ),
++            Key::Rsa {
++                scheme: RsaScheme::RsaPkcs1v15Sha256,
++                keyval,
++                ..
++            } => (
++                &aws_lc_rs::signature::RSA_PKCS1_2048_8192_SHA256,
+                 untrusted::Input::from(&keyval.public),
+             ),
+         };
